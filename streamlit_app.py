@@ -23,6 +23,16 @@ st.set_page_config(
     layout="centered"
 )
 
+# Hide Streamlit elements (header, footer, menu)
+hide_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_style, unsafe_allow_html=True)
+
 # Scraping Functions
 def fetch_google_rate(base, target, headers):
     pair_str = f"{base}-{target}"

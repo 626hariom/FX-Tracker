@@ -12,7 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import io
 import random
 
@@ -95,7 +95,11 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
     }
     
     rows = []
-    timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    utc_now = datetime.now(timezone.utc)
+    ist_time = utc_now + timedelta(hours=5, minutes=30)
+    wat_time = utc_now + timedelta(hours=1)
+    ist_str = ist_time.strftime("%Y-%m-%d %H:%M:%S")
+    wat_str = wat_time.strftime("%Y-%m-%d %H:%M:%S")
     
     # Progress Bar
     progress_bar = st.progress(0)
@@ -133,7 +137,8 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
             "OANDA FX": google_rate if oanda_rate is None else oanda_rate,
             "WISE FX": wise_rate,
             "GOOGLE FX RATE": google_rate,
-            "Timestamp": timestamp_str
+            "Timestamp (IST)": ist_str,
+            "Timestamp (WAT)": wat_str
         }
         rows.append(row)
         time.sleep(0.1) # Shorter sleep for cloud run
@@ -190,7 +195,7 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
                 col_name = df.columns[col_idx - 1]
                 val = cell.value
                 
-                if col_name in ["From", "To", "Timestamp"]:
+                if col_name in ["From", "To", "Timestamp (IST)", "Timestamp (WAT)"]:
                     cell.alignment = align_center
                 elif col_name in ["Bmoni UI FX", "Bmoni Exchange Rate"] or cell.value == "NA":
                     cell.alignment = align_center

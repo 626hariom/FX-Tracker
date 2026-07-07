@@ -150,7 +150,8 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
     
     # Show preview in the app
     st.subheader("📋 Rates Preview")
-    st.dataframe(df)
+    # Convert to string to avoid PyArrow type serialization errors on mixed types in preview
+    st.dataframe(df.astype(str))
     
     # Generate Excel in memory
     excel_buffer = io.BytesIO()

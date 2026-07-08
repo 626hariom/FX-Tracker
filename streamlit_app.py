@@ -36,7 +36,8 @@ st.markdown(hide_style, unsafe_allow_html=True)
 # Scraping Functions
 def fetch_google_rate(base, target, headers):
     pair_str = f"{base}-{target}"
-    url = f"https://www.google.com/finance/quote/{pair_str}"
+    # Use random cache buster parameter to prevent CDN and intermediate caching
+    url = f"https://www.google.com/finance/quote/{pair_str}?cb={random.random()}"
     try:
         response = requests.get(url, headers=headers, timeout=5)
         if response.status_code == 200:
@@ -51,11 +52,13 @@ def fetch_google_rate(base, target, headers):
 
 def fetch_wise_rate(base, target, headers):
     url = "https://wise.com/rates/history+live"
+    # Use random timestamp parameter to bypass caching mechanisms
     params = {
         "source": base,
         "target": target,
         "length": "1",
-        "resolution": "hourly"
+        "resolution": "hourly",
+        "cb": str(int(time.time() * 1000))
     }
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
@@ -91,7 +94,10 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
                 pairs.append((base, target))
                 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0"
     }
     
     rows = []
@@ -125,8 +131,10 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
         if google_rate is not None:
             if target == "NGN" and base in ["USD", "CAD", "GBP", "EUR"]:
                 lemfi_rate = round(google_rate * 0.992, 4)
-            elif base == "NGN" and target == "CAD":
+            elif base == "NGN" and target in ["USD", "CAD", "GBP", "EUR"]:
                 lemfi_rate = round(google_rate * 0.990, 6)
+            elif target == "MXN" and base in ["USD", "CAD", "GBP", "EUR"]:
+                lemfi_rate = round(google_rate * 0.992, 4) # 0.8% typical markup to MXN
                 
         row = {
             "From": base,

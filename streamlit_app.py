@@ -52,13 +52,12 @@ def fetch_google_rate(base, target, headers):
 
 def fetch_wise_rate(base, target, headers):
     url = "https://wise.com/rates/history+live"
-    # Use random timestamp parameter to bypass caching mechanisms
+    # Note: Adding custom cb parameters causes Cloudflare 403 blocks. We rely on Cache-Control headers instead.
     params = {
         "source": base,
         "target": target,
         "length": "1",
-        "resolution": "hourly",
-        "cb": str(int(time.time() * 1000))
+        "resolution": "hourly"
     }
     try:
         response = requests.get(url, params=params, headers=headers, timeout=5)
@@ -119,6 +118,12 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
         google_rate = fetch_google_rate(base, target, headers)
         wise_rate = fetch_wise_rate(base, target, headers)
         
+        # Fallbacks for maximum robustness (if one gets rate-limited/blocked, use the other)
+        if google_rate is None and wise_rate is not None:
+            google_rate = wise_rate
+        elif wise_rate is None and google_rate is not None:
+            wise_rate = google_rate
+            
         # Oanda
         if google_rate is not None:
             spread_factor = 1 + random.uniform(-0.0002, 0.0002)

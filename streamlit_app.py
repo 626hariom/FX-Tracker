@@ -82,6 +82,27 @@ and generates a styled Excel sheet with comparisons from:
 Columns for **Bmoni UI FX** and **Bmoni Exchange Rate** are left blank for manual inputs.
 """)
 
+# Sidebar Overrides
+st.sidebar.header("⚙️ Manual Overrides (Optional)")
+st.sidebar.markdown("""
+Force specific baseline rates to match your screen exactly. 
+If left blank, live rates will be used.
+""")
+lemfi_override_str = st.sidebar.text_input("LemFi USD-NGN Rate", placeholder="e.g. 1782").strip()
+wise_override_str = st.sidebar.text_input("Wise USD-NGN Rate", placeholder="e.g. 1783").strip()
+
+try:
+    lemfi_override = float(lemfi_override_str) if lemfi_override_str else None
+except ValueError:
+    st.sidebar.error("Invalid number format for LemFi override.")
+    lemfi_override = None
+
+try:
+    wise_override = float(wise_override_str) if wise_override_str else None
+except ValueError:
+    st.sidebar.error("Invalid number format for Wise override.")
+    wise_override = None
+
 if st.button("🚀 Generate Excel FX Sheet", type="primary"):
     currencies = ["NGN", "USD", "MXN", "EUR", "GBP", "CAD"]
     
@@ -99,7 +120,10 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
         "Expires": "0"
     }
     
-    rows = []
+    # First pass: Fetch all raw data from live APIs
+    fetched_data = []
+    google_rates = {} # Map of (base, target) -> rate
+    
     utc_now = datetime.now(timezone.utc)
     ist_time = utc_now + timedelta(hours=5, minutes=30)
     wat_time = utc_now + timedelta(hours=1)
@@ -111,36 +135,91 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
     status_text = st.empty()
     
     for idx, (base, target) in enumerate(pairs, 1):
-        status_text.text(f"Processing {base} to {target} ({idx}/30)...")
+        status_text.text(f"Fetching raw data: {base} to {target} ({idx}/30)...")
         progress_bar.progress(idx / 30)
         
-        # Fetch rates
         google_rate = fetch_google_rate(base, target, headers)
         wise_rate = fetch_wise_rate(base, target, headers)
         
-        # Fallbacks for maximum robustness (if one gets rate-limited/blocked, use the other)
+        # Fallbacks for raw data robustness
         if google_rate is None and wise_rate is not None:
             google_rate = wise_rate
         elif wise_rate is None and google_rate is not None:
             wise_rate = google_rate
             
-        # Oanda
+        if google_rate is not None:
+            google_rates[(base, target)] = google_rate
+            
+        fetched_data.append({
+            "base": base,
+            "target": target,
+            "google_rate": google_rate,
+            "wise_rate": wise_rate
+        })
+        time.sleep(0.1) # Shorter sleep for cloud run
+        
+    status_text.text("Processing custom overrides and calculating tables...")
+    
+    # Second pass: Process overrides and calculate final rates
+    rows = []
+    for item in fetched_data:
+        base = item["base"]
+        target = item["target"]
+        google_rate = item["google_rate"]
+        wise_rate = item["wise_rate"]
+        
+        # 1. Determine OANDA rate (raw Google mid-market rate with tiny spread)
         if google_rate is not None:
             spread_factor = 1 + random.uniform(-0.0002, 0.0002)
             oanda_rate = round(google_rate * spread_factor, 6)
         else:
             oanda_rate = None
             
-        # Lemfi
+        # 2. Determine Wise rate (incorporating custom override if specified for NGN corridors)
+        final_wise_rate = wise_rate
+        if wise_override is not None:
+            if target == "NGN":
+                if base == "USD":
+                    final_wise_rate = wise_override
+                elif base in ["CAD", "GBP", "EUR"]:
+                    rate_to_usd = google_rates.get((base, "USD"))
+                    if rate_to_usd is not None:
+                        final_wise_rate = round(rate_to_usd * wise_override, 4)
+            elif base == "NGN":
+                if target in ["USD", "CAD", "GBP", "EUR"]:
+                    rate_usd_to_target = google_rates.get(("USD", target))
+                    if rate_usd_to_target is not None:
+                        final_wise_rate = round((1.0 / wise_override) * rate_usd_to_target, 6)
+                        
+        # 3. Determine LemFi rate (incorporating custom override if specified)
+        # Determine the baseline LemFi USD-NGN rate
+        if lemfi_override is not None:
+            lemfi_base = lemfi_override
+        elif google_rates.get(("USD", "NGN")) is not None:
+            lemfi_base = google_rates.get(("USD", "NGN")) * 0.992
+        else:
+            lemfi_base = None
+            
+        # Calculate LemFi rates using baseline
         lemfi_rate = "NA"
-        if google_rate is not None:
-            if target == "NGN" and base in ["USD", "CAD", "GBP", "EUR"]:
-                lemfi_rate = round(google_rate * 0.992, 4)
-            elif base == "NGN" and target in ["USD", "CAD", "GBP", "EUR"]:
-                lemfi_rate = round(google_rate * 0.990, 6)
+        if lemfi_base is not None:
+            if target == "NGN":
+                if base == "USD":
+                    lemfi_rate = round(lemfi_base, 4)
+                elif base in ["CAD", "GBP", "EUR"]:
+                    rate_to_usd = google_rates.get((base, "USD"))
+                    if rate_to_usd is not None:
+                        lemfi_rate = round(rate_to_usd * lemfi_base, 4)
+            elif base == "NGN":
+                if target in ["USD", "CAD", "GBP", "EUR"]:
+                    rate_usd_to_target = google_rates.get(("USD", target))
+                    if rate_usd_to_target is not None:
+                        lemfi_rate = round((1.0 / lemfi_base) * rate_usd_to_target * 0.990, 6)
             elif target == "MXN" and base in ["USD", "CAD", "GBP", "EUR"]:
-                lemfi_rate = round(google_rate * 0.992, 4) # 0.8% typical markup to MXN
-                
+                rate_base_to_mxn = google_rates.get((base, "MXN"))
+                if rate_base_to_mxn is not None:
+                    lemfi_rate = round(rate_base_to_mxn * 0.992, 4)
+                    
         row = {
             "From": base,
             "To": target,
@@ -148,13 +227,12 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
             "Bmoni Exchange Rate": "",
             "LEMFI FX": lemfi_rate,
             "OANDA FX": google_rate if oanda_rate is None else oanda_rate,
-            "WISE FX": wise_rate,
+            "WISE FX": final_wise_rate,
             "GOOGLE FX RATE": google_rate,
             "Timestamp (IST)": ist_str,
             "Timestamp (WAT)": wat_str
         }
         rows.append(row)
-        time.sleep(0.1) # Shorter sleep for cloud run
         
     status_text.success("Rate collection complete!")
     progress_bar.empty()

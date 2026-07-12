@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timezone, timedelta
 import io
 import random
+import os
 
 # Page Configuration
 st.set_page_config(
@@ -102,6 +103,12 @@ try:
 except ValueError:
     st.sidebar.error("Invalid number format for Wise override.")
     wise_override = None
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📄 Template Excel Sheet")
+st.sidebar.markdown("Provide a template file to keep its layout and styles. Otherwise, the app uses `10072026_BMONI_fx_rate_30_pairs.xlsx` or defaults.")
+uploaded_template = st.sidebar.file_uploader("Upload Excel Template (.xlsx)", type=["xlsx"])
+
 
 if st.button("🚀 Generate Excel FX Sheet", type="primary"):
     currencies = ["NGN", "USD", "MXN", "EUR", "GBP", "CAD"]
@@ -246,72 +253,181 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
     
     # Generate Excel in memory
     excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name="FX Comparison")
-        
-        # Styling configurations
-        workbook = writer.book
-        worksheet = writer.sheets["FX Comparison"]
-        
-        from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-        
-        font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
-        font_body = Font(name="Segoe UI", size=10)
-        
-        fill_header = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
-        fill_zebra = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")
-        
-        thin_side = Side(border_style="thin", color="D3D3D3")
-        border_all = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
-        
-        align_center = Alignment(horizontal="center", vertical="center")
-        align_right = Alignment(horizontal="right", vertical="center")
-        
-        for col_idx in range(1, len(df.columns) + 1):
-            cell = worksheet.cell(row=1, column=col_idx)
-            cell.font = font_header
-            cell.fill = fill_header
-            cell.alignment = align_center
-            cell.border = border_all
+    template_loaded = False
+    
+    import openpyxl
+    from openpyxl.styles import Font
+    
+    wb = None
+    # 1. Try uploaded template first
+    if uploaded_template is not None:
+        try:
+            # openpyxl can load from a BytesIO file-like object directly
+            wb = openpyxl.load_workbook(uploaded_template)
+            template_loaded = True
+            st.success("Uploaded Excel template loaded successfully!")
+        except Exception as e:
+            st.error(f"Failed to load uploaded Excel template: {e}. Trying local file...")
             
-        for row_idx in range(2, len(df) + 2):
-            is_even = (row_idx % 2 == 0)
+    # 2. Try local template file next
+    if wb is None:
+        local_template_path = "10072026_BMONI_fx_rate_30_pairs.xlsx"
+        if os.path.exists(local_template_path):
+            try:
+                wb = openpyxl.load_workbook(local_template_path)
+                template_loaded = True
+                st.info("Using local Excel template: `10072026_BMONI_fx_rate_30_pairs.xlsx`")
+            except Exception as e:
+                st.warning(f"Failed to load local template: {e}. Generating sheet from scratch...")
+                
+    # 3. If template loaded, populate the latest rates
+    template_success = False
+    if template_loaded and wb is not None:
+        try:
+            # Find the active sheet or "FX Comparison"
+            sheet_name = "FX Comparison" if "FX Comparison" in wb.sheetnames else wb.sheetnames[0]
+            ws = wb[sheet_name]
+            
+            # Write execution timestamp to cell F5
+            ws.cell(row=5, column=6).value = f"Last Checked: {ist_str} (IST) / {wat_str} (WAT)"
+            ws.cell(row=5, column=6).font = Font(name="Segoe UI", size=9, italic=True, color="555555")
+            
+            # Map rates for quick lookup
+            rates_map = {}
+            for r in rows:
+                rates_map[(r["From"], r["To"])] = {
+                    "google": r["GOOGLE FX RATE"],
+                    "wise": r["WISE FX"],
+                    "lemfi": r["LEMFI FX"],
+                    "oanda": r["OANDA FX"]
+                }
+                
+            modified_count = 0
+            # Populate cells (Rows 10 to 39, column F to L)
+            for r in range(10, 40):
+                pair_cell = ws.cell(row=r, column=6).value # Column F is 6
+                if not pair_cell:
+                    continue
+                # Clean pair (replace arrows and spaces)
+                cleaned = str(pair_cell).replace("→", "").replace("->", "").replace("to", "").strip()
+                parts = [p.strip() for p in cleaned.split() if p.strip()]
+                if len(parts) == 2:
+                    base, target = parts[0], parts[1]
+                    key = (base, target)
+                    if key in rates_map:
+                        rates = rates_map[key]
+                        
+                        # Google Rate in Column I (9)
+                        if rates.get("google") is not None:
+                            ws.cell(row=r, column=9).value = rates["google"]
+                            ws.cell(row=r, column=9).number_format = '0.0000'
+                        else:
+                            ws.cell(row=r, column=9).value = ""
+                            
+                        # Wise Rate in Column J (10)
+                        if rates.get("wise") is not None:
+                            ws.cell(row=r, column=10).value = rates["wise"]
+                            ws.cell(row=r, column=10).number_format = '0.0000'
+                        else:
+                            ws.cell(row=r, column=10).value = ""
+                            
+                        # LemFi Rate in Column K (11)
+                        lemfi_val = rates.get("lemfi")
+                        if lemfi_val == "NA":
+                            ws.cell(row=r, column=11).value = "NA"
+                        elif lemfi_val is not None:
+                            ws.cell(row=r, column=11).value = lemfi_val
+                            if isinstance(lemfi_val, (int, float)):
+                                ws.cell(row=r, column=11).number_format = '0.0000'
+                        else:
+                            ws.cell(row=r, column=11).value = ""
+                            
+                        # Oanda Rate in Column L (12)
+                        if rates.get("oanda") is not None:
+                            ws.cell(row=r, column=12).value = rates["oanda"]
+                            ws.cell(row=r, column=12).number_format = '0.0000'
+                        else:
+                            ws.cell(row=r, column=12).value = ""
+                            
+                        modified_count += 1
+                        
+            # Save the workbook to our memory buffer
+            wb.save(excel_buffer)
+            template_success = True
+            st.success(f"Populated {modified_count} currency pairs inside your designed Excel template!")
+        except Exception as e:
+            st.error(f"Error filling template: {e}. Falling back to default styled table...")
+            template_success = False
+            
+    # 4. Fallback: generate default styled table from scratch
+    if not template_success:
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name="FX Comparison")
+            
+            # Styling configurations
+            workbook = writer.book
+            worksheet = writer.sheets["FX Comparison"]
+            
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+            
+            font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+            font_body = Font(name="Segoe UI", size=10)
+            
+            fill_header = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
+            fill_zebra = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")
+            
+            thin_side = Side(border_style="thin", color="D3D3D3")
+            border_all = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+            
+            align_center = Alignment(horizontal="center", vertical="center")
+            align_right = Alignment(horizontal="right", vertical="center")
+            
             for col_idx in range(1, len(df.columns) + 1):
-                cell = worksheet.cell(row=row_idx, column=col_idx)
-                cell.font = font_body
+                cell = worksheet.cell(row=1, column=col_idx)
+                cell.font = font_header
+                cell.fill = fill_header
+                cell.alignment = align_center
                 cell.border = border_all
                 
-                if is_even:
-                    cell.fill = fill_zebra
+            for row_idx in range(2, len(df) + 2):
+                is_even = (row_idx % 2 == 0)
+                for col_idx in range(1, len(df.columns) + 1):
+                    cell = worksheet.cell(row=row_idx, column=col_idx)
+                    cell.font = font_body
+                    cell.border = border_all
                     
-                col_name = df.columns[col_idx - 1]
-                val = cell.value
+                    if is_even:
+                        cell.fill = fill_zebra
+                        
+                    col_name = df.columns[col_idx - 1]
+                    val = cell.value
+                    
+                    if col_name in ["From", "To", "Timestamp (IST)", "Timestamp (WAT)"]:
+                        cell.alignment = align_center
+                    elif col_name in ["Bmoni UI FX", "Bmoni Exchange Rate"] or cell.value == "NA":
+                        cell.alignment = align_center
+                    else:
+                        cell.alignment = align_right
+                        
+                    if val not in ["", "NA"] and val is not None:
+                        if col_name in ["LEMFI FX", "OANDA FX", "WISE FX", "GOOGLE FX RATE"]:
+                            try:
+                                cell.number_format = '0.0000'
+                            except:
+                                pass
+                                
+            for col in worksheet.columns:
+                max_len = 0
+                col_letter = col[0].column_letter
+                for cell in col:
+                    val_str = str(cell.value or '')
+                    if len(val_str) > max_len:
+                        max_len = len(val_str)
+                worksheet.column_dimensions[col_letter].width = max(max_len + 4, 12)
                 
-                if col_name in ["From", "To", "Timestamp (IST)", "Timestamp (WAT)"]:
-                    cell.alignment = align_center
-                elif col_name in ["Bmoni UI FX", "Bmoni Exchange Rate"] or cell.value == "NA":
-                    cell.alignment = align_center
-                else:
-                    cell.alignment = align_right
-                    
-                if val not in ["", "NA"] and val is not None:
-                    if col_name in ["LEMFI FX", "OANDA FX", "WISE FX", "GOOGLE FX RATE"]:
-                        try:
-                            cell.number_format = '0.0000'
-                        except:
-                            pass
-                            
-        for col in worksheet.columns:
-            max_len = 0
-            col_letter = col[0].column_letter
-            for cell in col:
-                val_str = str(cell.value or '')
-                if len(val_str) > max_len:
-                    max_len = len(val_str)
-            worksheet.column_dimensions[col_letter].width = max(max_len + 4, 12)
+            worksheet.views.sheetView[0].showGridLines = True
             
-        worksheet.views.sheetView[0].showGridLines = True
-        
     excel_buffer.seek(0)
     
     # Download Button

@@ -4,37 +4,16 @@
 #   "beautifulsoup4",
 #   "pandas",
 #   "openpyxl",
-#   "streamlit",
 # ]
 # ///
-import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 import time
 from datetime import datetime, timezone, timedelta
-import io
-import random
 import os
+import random
 
-# Page Configuration
-st.set_page_config(
-    page_title="FX Rate Tracker & Excel Generator",
-    page_icon="📊",
-    layout="centered"
-)
-
-# Hide Streamlit elements (header, footer, menu)
-hide_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            header {visibility: hidden;}
-            </style>
-            """
-st.markdown(hide_style, unsafe_allow_html=True)
-
-# Scraping Functions
 def fetch_google_rate(base, target, headers):
     pair_str = f"{base}-{target}"
     # Use random cache buster parameter to prevent CDN and intermediate caching
@@ -48,7 +27,7 @@ def fetch_google_rate(base, target, headers):
                 text_val = rate_elem.text.strip().replace(",", "")
                 return float(text_val)
     except Exception as e:
-        pass
+        print(f"Error fetching Google rate for {pair_str}: {e}")
     return None
 
 def fetch_wise_rate(base, target, headers):
@@ -67,53 +46,14 @@ def fetch_wise_rate(base, target, headers):
             if isinstance(data, list) and len(data) > 0:
                 return float(data[-1]["value"])
     except Exception as e:
-        pass
+        print(f"Error fetching Wise rate for {base}-{target}: {e}")
     return None
 
-# App UI
-st.title("📊 FX Rate Tracker & Comparison")
-st.markdown("""
-This web application fetches real-time FX rates across all **30 combinations** of **NGN, USD, MXN, EUR, GBP, CAD** 
-and generates a styled Excel sheet with comparisons from:
-* **Google Finance**
-* **Wise**
-* **Oanda** (referenced mid-market)
-* **Lemfi** (NGN Remittance Corridors)
-
-Columns for **Bmoni UI FX** and **Bmoni Exchange Rate** are left blank for manual inputs.
-""")
-
-# Sidebar Overrides
-st.sidebar.header("⚙️ Manual Overrides (Optional)")
-st.sidebar.markdown("""
-Force specific baseline rates to match your screen exactly. 
-If left blank, live rates will be used.
-""")
-lemfi_override_str = st.sidebar.text_input("LemFi USD-NGN Rate", placeholder="e.g. 1782").strip()
-wise_override_str = st.sidebar.text_input("Wise USD-NGN Rate", placeholder="e.g. 1783").strip()
-
-try:
-    lemfi_override = float(lemfi_override_str) if lemfi_override_str else None
-except ValueError:
-    st.sidebar.error("Invalid number format for LemFi override.")
-    lemfi_override = None
-
-try:
-    wise_override = float(wise_override_str) if wise_override_str else None
-except ValueError:
-    st.sidebar.error("Invalid number format for Wise override.")
-    wise_override = None
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("📄 Template Excel Sheet")
-st.sidebar.markdown("Provide a template file to keep its layout and styles. Otherwise, the app uses `10072026_BMONI_fx_rate_30_pairs.xlsx` or defaults.")
-uploaded_template = st.sidebar.file_uploader("Upload Excel Template (.xlsx)", type=["xlsx"])
-
-
-if st.button("🚀 Generate Excel FX Sheet", type="primary"):
+def main():
+    print("Starting FX Rate Tracker...")
     currencies = ["NGN", "USD", "MXN", "EUR", "GBP", "CAD"]
     
-    # Generate pairs
+    # Generate all 30 combinations (permutations where base != target)
     pairs = []
     for base in currencies:
         for target in currencies:
@@ -127,6 +67,28 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
         "Expires": "0"
     }
     
+    lemfi_override = None
+    wise_override = None
+    import sys
+    if sys.stdin and sys.stdin.isatty():
+        try:
+            print("\n--- Optional Manual Overrides ---")
+            print("If you want to force specific rates to match your screen exactly, enter them below.")
+            print("Otherwise, just press Enter to use real-time live data.")
+            
+            lemfi_override_str = input("Enter LemFi USD-NGN rate [Press Enter to auto-calculate]: ").strip()
+            if lemfi_override_str:
+                lemfi_override = float(lemfi_override_str)
+                
+            wise_override_str = input("Enter Wise USD-NGN rate [Press Enter to auto-fetch]: ").strip()
+            if wise_override_str:
+                wise_override = float(wise_override_str)
+            print("---------------------------------\n")
+        except (EOFError, ValueError):
+            pass
+    else:
+        print("\n[Info] Non-interactive terminal detected. Skipping manual overrides and using live data.\n")
+
     # First pass: Fetch all raw data from live APIs
     fetched_data = []
     google_rates = {} # Map of (base, target) -> rate
@@ -137,18 +99,12 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
     ist_str = ist_time.strftime("%Y-%m-%d %H:%M:%S")
     wat_str = wat_time.strftime("%Y-%m-%d %H:%M:%S")
     
-    # Progress Bar
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
     for idx, (base, target) in enumerate(pairs, 1):
-        status_text.text(f"Fetching raw data: {base} to {target} ({idx}/30)...")
-        progress_bar.progress(idx / 30)
-        
+        print(f"[{idx}/30] Processing {base} to {target}...")
         google_rate = fetch_google_rate(base, target, headers)
         wise_rate = fetch_wise_rate(base, target, headers)
         
-        # Fallbacks for raw data robustness
+        # Fallbacks for raw data robustness (if one fails, use the other as baseline)
         if google_rate is None and wise_rate is not None:
             google_rate = wise_rate
         elif wise_rate is None and google_rate is not None:
@@ -163,10 +119,8 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
             "google_rate": google_rate,
             "wise_rate": wise_rate
         })
-        time.sleep(0.1) # Shorter sleep for cloud run
+        time.sleep(0.5)
         
-    status_text.text("Processing custom overrides and calculating tables...")
-    
     # Second pass: Process overrides and calculate final rates
     rows = []
     for item in fetched_data:
@@ -241,54 +195,25 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
         }
         rows.append(row)
         
-    status_text.success("Rate collection complete!")
-    progress_bar.empty()
-    
     df = pd.DataFrame(rows)
     
-    # Show preview in the app
-    st.subheader("📋 Rates Preview")
-    # Convert to string to avoid PyArrow type serialization errors on mixed types in preview
-    st.dataframe(df.astype(str))
+    # Save to Excel
+    filename = "fx_rates_comparison.xlsx"
+    template_filename = "10072026_BMONI_fx_rate_30_pairs.xlsx"
     
-    # Generate Excel in memory
-    excel_buffer = io.BytesIO()
-    template_loaded = False
-    
-    import openpyxl
-    from openpyxl.styles import Font
-    
-    wb = None
-    # 1. Try uploaded template first
-    if uploaded_template is not None:
+    # Check if template file exists
+    if os.path.exists(template_filename):
+        print(f"Template file found: {template_filename}. Populating latest rates...")
         try:
-            # openpyxl can load from a BytesIO file-like object directly
-            wb = openpyxl.load_workbook(uploaded_template)
-            template_loaded = True
-            st.success("Uploaded Excel template loaded successfully!")
-        except Exception as e:
-            st.error(f"Failed to load uploaded Excel template: {e}. Trying local file...")
+            import openpyxl
+            from openpyxl.styles import Font
             
-    # 2. Try local template file next
-    if wb is None:
-        local_template_path = "10072026_BMONI_fx_rate_30_pairs.xlsx"
-        if os.path.exists(local_template_path):
-            try:
-                wb = openpyxl.load_workbook(local_template_path)
-                template_loaded = True
-                st.info("Using local Excel template: `10072026_BMONI_fx_rate_30_pairs.xlsx`")
-            except Exception as e:
-                st.warning(f"Failed to load local template: {e}. Generating sheet from scratch...")
-                
-    # 3. If template loaded, populate the latest rates
-    template_success = False
-    if template_loaded and wb is not None:
-        try:
+            wb = openpyxl.load_workbook(template_filename)
             # Find the active sheet or "FX Comparison"
             sheet_name = "FX Comparison" if "FX Comparison" in wb.sheetnames else wb.sheetnames[0]
             ws = wb[sheet_name]
             
-            # Write execution timestamp to cell F5
+            # Write timestamp in cell F5 (Row 5, Column 6)
             ws.cell(row=5, column=6).value = f"Last Checked: {ist_str} (IST) / {wat_str} (WAT)"
             ws.cell(row=5, column=6).font = Font(name="Segoe UI", size=9, italic=True, color="555555")
             
@@ -304,7 +229,7 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
                 cell.font = header_font
                 cell.alignment = align_center
             
-            # Map rates for quick lookup
+            # Create a dictionary map of rates for quick lookup
             rates_map = {}
             for r in rows:
                 rates_map[(r["From"], r["To"])] = {
@@ -315,12 +240,12 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
                 }
                 
             modified_count = 0
-            # Populate cells (Rows 10 to 39, column F to L)
+            # Iterate rows 10 to 39 (openpyxl uses 1-based indexing)
             for r in range(10, 40):
                 pair_cell = ws.cell(row=r, column=6).value # Column F is 6
                 if not pair_cell:
                     continue
-                # Clean pair (replace arrows and spaces)
+                # Clean pair text (e.g. NGN -> USD, NGN  USD, NGN to USD)
                 cleaned = str(pair_cell).replace("→", "").replace("->", "").replace("to", "").strip()
                 parts = [p.strip() for p in cleaned.split() if p.strip()]
                 if len(parts) == 2:
@@ -363,38 +288,54 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
                             
                         modified_count += 1
                         
-            # Save the workbook to our memory buffer
-            wb.save(excel_buffer)
-            template_success = True
-            st.success(f"Populated {modified_count} currency pairs inside your designed Excel template!")
-        except Exception as e:
-            st.error(f"Error filling template: {e}. Falling back to default styled table...")
-            template_success = False
+            print(f"Updated {modified_count} currency pairs in template sheet.")
             
-    # 4. Fallback: generate default styled table from scratch
-    if not template_success:
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+            def save_workbook_safely(fname):
+                wb.save(fname)
+                
+            try:
+                save_workbook_safely(filename)
+                print(f"SUCCESS: Sheet populated and saved successfully as '{filename}'.")
+                return
+            except PermissionError:
+                backup_filename = f"fx_rates_comparison_{datetime.now().strftime('%H%M%S')}.xlsx"
+                print(f"\n[WARNING] Permission denied: '{filename}' is open. Saving to: '{backup_filename}'...")
+                save_workbook_safely(backup_filename)
+                print(f"SUCCESS: Backup sheet saved successfully as '{backup_filename}'.")
+                return
+        except Exception as e:
+            print(f"Error populating Excel template: {e}. Falling back to default generation...")
+
+    # Default fallback: generate Excel from scratch with generic styles
+    print(f"Saving data from scratch to {filename}...")
+    def write_excel_file(fname):
+        with pd.ExcelWriter(fname, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name="FX Comparison")
             
-            # Styling configurations
+            # Get workbook and sheet objects
             workbook = writer.book
             worksheet = writer.sheets["FX Comparison"]
             
+            # Styling configurations
             from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
             
+            # Fonts
             font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
             font_body = Font(name="Segoe UI", size=10)
             
-            fill_header = PatternFill(start_color="A80F85", end_color="A80F85", fill_type="solid")
-            fill_zebra = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")
+            # Fills
+            fill_header = PatternFill(start_color="A80F85", end_color="A80F85", fill_type="solid") # Purple
+            fill_zebra = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")  # Light Blue/Gray
             
+            # Borders
             thin_side = Side(border_style="thin", color="D3D3D3")
             border_all = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
             
+            # Alignments
             align_center = Alignment(horizontal="center", vertical="center")
             align_right = Alignment(horizontal="right", vertical="center")
             
+            # Style Header
             for col_idx in range(1, len(df.columns) + 1):
                 cell = worksheet.cell(row=1, column=col_idx)
                 cell.font = font_header
@@ -402,6 +343,7 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
                 cell.alignment = align_center
                 cell.border = border_all
                 
+            # Style Data Rows
             for row_idx in range(2, len(df) + 2):
                 is_even = (row_idx % 2 == 0)
                 for col_idx in range(1, len(df.columns) + 1):
@@ -409,26 +351,32 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
                     cell.font = font_body
                     cell.border = border_all
                     
+                    # Apply alternating row colors (Zebra striping)
                     if is_even:
                         cell.fill = fill_zebra
                         
+                    # Format cell data alignment and numbers
                     col_name = df.columns[col_idx - 1]
                     val = cell.value
                     
+                    # Alignment
                     if col_name in ["From", "To", "Timestamp (IST)", "Timestamp (WAT)"]:
                         cell.alignment = align_center
                     elif col_name in ["Bmoni UI FX", "Bmoni Exchange Rate"] or cell.value == "NA":
-                        cell.alignment = align_center
+                        cell.alignment = align_center # Centered blank inputs or NA
                     else:
-                        cell.alignment = align_right
+                        cell.alignment = align_right # Numerical rates
                         
+                    # Number formatting
                     if val not in ["", "NA"] and val is not None:
                         if col_name in ["LEMFI FX", "OANDA FX", "WISE FX", "GOOGLE FX RATE"]:
                             try:
+                                # 4 decimal places format for exchange rates
                                 cell.number_format = '0.0000'
                             except:
                                 pass
                                 
+            # Autofit column widths
             for col in worksheet.columns:
                 max_len = 0
                 col_letter = col[0].column_letter
@@ -436,17 +384,27 @@ if st.button("🚀 Generate Excel FX Sheet", type="primary"):
                     val_str = str(cell.value or '')
                     if len(val_str) > max_len:
                         max_len = len(val_str)
+                # Add padding
                 worksheet.column_dimensions[col_letter].width = max(max_len + 4, 12)
                 
+            # Enable grid lines
             worksheet.views.sheetView[0].showGridLines = True
             
-    excel_buffer.seek(0)
-    
-    # Download Button
-    st.download_button(
-        label="📥 Download Excel Sheet",
-        data=excel_buffer,
-        file_name=f"fx_rates_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary"
-    )
+    try:
+        write_excel_file(filename)
+        print(f"SUCCESS: Sheet generated successfully as '{filename}'.")
+    except PermissionError:
+        print(f"\n[WARNING] Permission denied: '{filename}' is currently open in Excel or another program.")
+        backup_filename = f"fx_rates_comparison_{datetime.now().strftime('%H%M%S')}.xlsx"
+        print(f"Attempting to save to backup file: '{backup_filename}'...")
+        try:
+            write_excel_file(backup_filename)
+            print(f"SUCCESS: Backup sheet generated successfully as '{backup_filename}'.")
+            print("Please close the original Excel file before running the script next time.")
+        except Exception as e:
+            print(f"[ERROR] Failed to save backup file: {e}")
+    except Exception as e:
+        print(f"[ERROR] Failed to save Excel file: {e}")
+
+if __name__ == "__main__":
+    main()

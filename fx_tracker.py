@@ -49,6 +49,65 @@ def fetch_wise_rate(base, target, headers):
         print(f"Error fetching Wise rate for {base}-{target}: {e}")
     return None
 
+def fetch_oanda_rate(base, target, headers):
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    yesterday = (_dt.now(_tz.utc) - _td(days=1)).strftime("%Y-%m-%d")
+    today = _dt.now(_tz.utc).strftime("%Y-%m-%d")
+    try:
+        response = requests.get(
+            "https://fxds-public-exchange-rates-api.oanda.com/cc-api/currencies",
+            params={
+                "base": base,
+                "quote": target,
+                "data_type": "general_currency_pair",
+                "start_date": yesterday,
+                "end_date": today
+            },
+            headers={**headers, "Referer": "https://www.oanda.com/currency-converter/en/"},
+            timeout=5
+        )
+        if response.status_code == 200:
+            data = response.json()
+            resp_list = data.get("response", [])
+            if resp_list:
+                latest = resp_list[-1]
+                bid = float(latest["average_bid"])
+                ask = float(latest["average_ask"])
+                return round((bid + ask) / 2, 6)
+    except Exception as e:
+        print(f"Error fetching OANDA rate for {base}-{target}: {e}")
+    return None
+
+LEMFI_COUNTRIES = {
+    "USD": "United States",
+    "EUR": "Ireland",
+    "GBP": "United Kingdom",
+    "CAD": "Canada",
+    "NGN": "Nigeria",
+    "MXN": "Mexico",
+}
+
+def fetch_lemfi_rate(base, target, headers):
+    import re as _re
+    country = LEMFI_COUNTRIES.get(base, "United States")
+    try:
+        response = requests.post(
+            "https://www.lemfi.com/api/lemonade/v2/exchange",
+            json={"from": base, "to": target, "sender_country": country},
+            headers={"Content-Type": "application/json", "x-app-locale": "en-gb", **headers},
+            timeout=5
+        )
+        if response.status_code == 200:
+            data = response.json().get("data", {})
+            raw_rate = float(data.get("rate", 0))
+            id_str = data.get("ID", "")
+            digits_only = _re.sub(r'\D', '', id_str)
+            divisor = int(digits_only) if digits_only else 1
+            return round(raw_rate / divisor, 6)
+    except Exception as e:
+        print(f"Error fetching LemFi rate for {base}-{target}: {e}")
+    return None
+
 def main():
     print("Starting FX Rate Tracker...")
     currencies = ["NGN", "USD", "MXN", "EUR", "GBP", "CAD"]
@@ -103,6 +162,8 @@ def main():
         print(f"[{idx}/30] Processing {base} to {target}...")
         google_rate = fetch_google_rate(base, target, headers)
         wise_rate = fetch_wise_rate(base, target, headers)
+        oanda_rate = fetch_oanda_rate(base, target, headers)
+        lemfi_rate = fetch_lemfi_rate(base, target, headers)
         
         # Fallbacks for raw data robustness (if one fails, use the other as baseline)
         if google_rate is None and wise_rate is not None:
@@ -117,7 +178,9 @@ def main():
             "base": base,
             "target": target,
             "google_rate": google_rate,
-            "wise_rate": wise_rate
+            "wise_rate": wise_rate,
+            "oanda_rate": oanda_rate,
+            "lemfi_rate": lemfi_rate
         })
         time.sleep(0.5)
         
@@ -128,13 +191,11 @@ def main():
         target = item["target"]
         google_rate = item["google_rate"]
         wise_rate = item["wise_rate"]
+        oanda_rate = item["oanda_rate"]
+        lemfi_rate = item["lemfi_rate"]
         
-        # 1. Determine OANDA rate (raw Google mid-market rate with tiny spread)
-        if google_rate is not None:
-            spread_factor = 1 + random.uniform(-0.0002, 0.0002)
-            oanda_rate = round(google_rate * spread_factor, 6)
-        else:
-            oanda_rate = None
+        # 1. Use real OANDA rate (scraped from OANDA public API)
+        # oanda_rate is already fetched - keep as is (None if not available)
             
         # 2. Determine Wise rate (incorporating custom override if specified for NGN corridors)
         final_wise_rate = wise_rate
@@ -152,34 +213,16 @@ def main():
                     if rate_usd_to_target is not None:
                         final_wise_rate = round((1.0 / wise_override) * rate_usd_to_target, 6)
                         
-        # 3. Determine LemFi rate (incorporating custom override if specified)
-        # Determine the baseline LemFi USD-NGN rate
-        if lemfi_override is not None:
-            lemfi_base = lemfi_override
-        elif google_rates.get(("USD", "NGN")) is not None:
-            lemfi_base = google_rates.get(("USD", "NGN")) * 0.992
+        # 3. LemFi rate (scraped from LemFi API)
+        # If override provided, use it for USD-NGN corridor
+        if lemfi_override is not None and base == "USD" and target == "NGN":
+            lemfi_rate = round(lemfi_override, 4)
+        # lemfi_rate is already fetched - keep as is (None if not available)
+        # LemFi API returns None for unsupported pairs (e.g. MXN corridors)
+        if lemfi_rate is None:
+            lemfi_rate = "NA"
         else:
-            lemfi_base = None
-            
-        # Calculate LemFi rates using baseline
-        lemfi_rate = "NA"
-        if lemfi_base is not None:
-            if target == "NGN":
-                if base == "USD":
-                    lemfi_rate = round(lemfi_base, 4)
-                elif base in ["CAD", "GBP", "EUR"]:
-                    rate_to_usd = google_rates.get((base, "USD"))
-                    if rate_to_usd is not None:
-                        lemfi_rate = round(rate_to_usd * lemfi_base, 4)
-            elif base == "NGN":
-                if target in ["USD", "CAD", "GBP", "EUR"]:
-                    rate_usd_to_target = google_rates.get(("USD", target))
-                    if rate_usd_to_target is not None:
-                        lemfi_rate = round((1.0 / lemfi_base) * rate_usd_to_target * 0.990, 6)
-            elif target == "MXN" and base in ["USD", "CAD", "GBP", "EUR"]:
-                rate_base_to_mxn = google_rates.get((base, "MXN"))
-                if rate_base_to_mxn is not None:
-                    lemfi_rate = round(rate_base_to_mxn * 0.992, 4)
+            lemfi_rate = round(lemfi_rate, 4)
                     
         row = {
             "From": base,
@@ -187,7 +230,7 @@ def main():
             "Bmoni UI FX": "",
             "Bmoni Exchange Rate": "",
             "LEMFI FX": lemfi_rate,
-            "OANDA FX": google_rate if oanda_rate is None else oanda_rate,
+            "OANDA FX": oanda_rate,
             "WISE FX": final_wise_rate,
             "GOOGLE FX RATE": google_rate,
             "Timestamp (IST)": ist_str,
@@ -213,21 +256,13 @@ def main():
             sheet_name = "FX Comparison" if "FX Comparison" in wb.sheetnames else wb.sheetnames[0]
             ws = wb[sheet_name]
             
+            # Preserve empty cell F8 that openpyxl may corrupt on save
+            if ws.cell(row=8, column=6).value is None:
+                ws.cell(row=8, column=6).value = ""
+
             # Write timestamp in cell F5 (Row 5, Column 6)
             ws.cell(row=5, column=6).value = f"Last Checked: {ist_str} (IST) / {wat_str} (WAT)"
             ws.cell(row=5, column=6).font = Font(name="Segoe UI", size=9, italic=True, color="555555")
-            
-            # Unify all headers in row 9 (columns F to L) to match the BMONI purple styling
-            from openpyxl.styles import PatternFill, Alignment
-            purple_fill = PatternFill(start_color="A80F85", end_color="A80F85", fill_type="solid")
-            header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
-            align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            
-            for c in range(6, 13):
-                cell = ws.cell(row=9, column=c)
-                cell.fill = purple_fill
-                cell.font = header_font
-                cell.alignment = align_center
             
             # Create a dictionary map of rates for quick lookup
             rates_map = {}
@@ -257,14 +292,12 @@ def main():
                         # Google Rate in Column I (9)
                         if rates.get("google") is not None:
                             ws.cell(row=r, column=9).value = rates["google"]
-                            ws.cell(row=r, column=9).number_format = '0.0000'
                         else:
                             ws.cell(row=r, column=9).value = ""
                             
                         # Wise Rate in Column J (10)
                         if rates.get("wise") is not None:
                             ws.cell(row=r, column=10).value = rates["wise"]
-                            ws.cell(row=r, column=10).number_format = '0.0000'
                         else:
                             ws.cell(row=r, column=10).value = ""
                             
@@ -274,15 +307,12 @@ def main():
                             ws.cell(row=r, column=11).value = "NA"
                         elif lemfi_val is not None:
                             ws.cell(row=r, column=11).value = lemfi_val
-                            if isinstance(lemfi_val, (int, float)):
-                                ws.cell(row=r, column=11).number_format = '0.0000'
                         else:
                             ws.cell(row=r, column=11).value = ""
                             
                         # Oanda Rate in Column L (12)
                         if rates.get("oanda") is not None:
                             ws.cell(row=r, column=12).value = rates["oanda"]
-                            ws.cell(row=r, column=12).number_format = '0.0000'
                         else:
                             ws.cell(row=r, column=12).value = ""
                             
